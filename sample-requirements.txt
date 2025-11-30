@@ -1,0 +1,11 @@
+Build a microservice that exposes a REST API for:
+- CRUD for Projects and Tasks
+- Task scheduling and status tracking
+- SQLite persistence
+- CLI to seed sample data
+- Unit tests for service layer and API endpoints
+- Containerization guidance in README
+- Write the file app.py to create the entrypoint and run the generated application
+Non-functional:
+- Logging, input validation
+- Clean boundaries: models, repository, service, api

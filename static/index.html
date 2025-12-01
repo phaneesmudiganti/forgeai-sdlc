@@ -2,35 +2,56 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Dev Crew SDLC Dashboard</title>
+  <title>ForgeAI SDLC Dashboard</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e5e7eb; }
     .container { max-width: 960px; margin: 0 auto; padding: 24px; }
     h1 { font-size: 24px; margin-bottom: 8px; }
     label { display: block; margin-top: 12px; }
-    input[type="text"] { width: 100%; padding: 8px; margin-top: 4px; border-radius: 4px; border: 1px solid #374151; background: #020617; color: #e5e7eb; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 8px; margin-top: 4px; border-radius: 4px; border: 1px solid #374151; background: #020617; color: #e5e7eb; }
     button { margin-top: 16px; padding: 10px 16px; border-radius: 4px; border: none; background: #2563eb; color: white; cursor: pointer; }
     button:disabled { background: #1f2937; cursor: not-allowed; }
     .status-box { margin-top: 24px; padding: 16px; background: #020617; border-radius: 8px; border: 1px solid #1f2937; }
     pre { white-space: pre-wrap; background: #020617; padding: 12px; border-radius: 4px; max-height: 400px; overflow-y: auto; }
+    .form-group { margin-bottom: 16px; }
+    .option-separator { margin: 8px 0; text-align: center; color: #6b7280; font-style: italic; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Dev Crew SDLC Dashboard</h1>
+    <h1>ForgeAI SDLC Dashboard</h1>
     <p>Run the multi-role SDLC workflow against a requirements text file.</p>
 
-    <label>
-      Requirements file path:
-      <input id="reqPath" type="text" placeholder="e.g. C:\\Users\\you\\requirements.txt" />
-    </label>
+<!--    <label>-->
+<!--      Requirements file path:-->
+<!--      <input id="reqPath" type="text" placeholder="e.g. C:\\Users\\you\\requirements.txt" />-->
+<!--    </label>-->
 
-    <label>
-      Output directory:
-      <input id="outDir" type="text" placeholder="e.g. C:\\Users\\you\\devcrew_output" />
-    </label>
+<!--    <label>-->
+<!--      Output directory:-->
+<!--      <input id="outDir" type="text" placeholder="e.g. C:\\Users\\you\\forgeai_output" />-->
+<!--    </label>-->
 
-    <button id="startBtn" onclick="startRun()">Start Run</button>
+<!--    <button id="startBtn" onclick="startRun()">Start Run</button>-->
+    <form id="runForm">
+      <div class="form-group">
+        <label>Requirements (choose one):</label>
+        <div style="margin-top: 8px;">
+          <input id="reqFile" type="file" accept=".txt,.md" style="margin-bottom: 8px;" />
+          <div class="option-separator">- or -</div>
+          <input id="reqPath" type="text" placeholder="Local file path (e.g. C:\requirements.txt)" />
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>
+          Output directory (optional):
+          <input id="outDir" type="text" placeholder="Leave empty for default output location" />
+        </label>
+      </div>
+
+      <button id="startBtn" type="submit">Start Run</button>
+    </form>
 
     <div class="status-box">
       <div><strong>Status:</strong> <span id="status">Idle</span></div>
@@ -64,114 +85,168 @@
 
     async function loadFileTree() {
       if (!currentRunId) return;
-      const resp = await fetch('/api/files/' + currentRunId);
-      if (!resp.ok) {
-        document.getElementById('fileTree').innerText = 'No files yet or error loading tree.';
-        return;
+      try {
+        const resp = await fetch('/api/files/' + currentRunId);
+        if (!resp.ok) {
+          document.getElementById('fileTree').innerText = 'No files yet or error loading tree.';
+          return;
+        }
+        const data = await resp.json();
+        document.getElementById('fileTree').innerHTML = buildTreeHTML(data.files || []);
+      } catch (error) {
+        document.getElementById('fileTree').innerText = 'Error loading file tree: ' + error.message;
       }
-      const data = await resp.json();
-      document.getElementById('fileTree').innerHTML = buildTreeHTML(data.tree);
     }
 
-    function buildTreeHTML(tree) {
-      return tree.map(item => {
-        if (item.type === 'folder') {
-          return `
-            <div>
-              <details open>
-                <summary>📁 ${item.name}</summary>
-                <div style="margin-left:16px;">
-                  ${buildTreeHTML(item.children)}
-                </div>
-              </details>
-            </div>
-          `;
-        } else {
-          return `
-            <div style="cursor:pointer;color:#93c5fd;margin-left:8px;" onclick="openFile('${item.path}')">
-              📄 ${item.name}
-            </div>
-          `;
-        }
+    function buildTreeHTML(files) {
+      if (!files || files.length === 0) {
+        return '<p>No files generated yet.</p>';
+      }
+
+      return files.map(file => {
+        return `
+          <div style="cursor:pointer;color:#93c5fd;margin-left:8px;" onclick="openFile('${file.path}')">
+            📄 ${file.path}
+          </div>
+        `;
       }).join('');
     }
 
     async function openFile(path) {
       if (!currentRunId) return;
-      const resp = await fetch('/api/file/' + currentRunId + '?file_path=' + encodeURIComponent(path));
-      if (!resp.ok) {
-        document.getElementById('filePreview').innerText = 'Error loading file.';
-        return;
+      try {
+        const resp = await fetch('/api/file/' + currentRunId + '?file_path=' + encodeURIComponent(path));
+        if (!resp.ok) {
+          document.getElementById('filePreview').innerText = 'Error loading file.';
+          return;
+        }
+        const data = await resp.json();
+        document.getElementById('filePreview').innerText = data.content;
+      } catch (error) {
+        document.getElementById('filePreview').innerText = 'Error loading file: ' + error.message;
       }
-      const data = await resp.json();
-      document.getElementById('filePreview').innerText = data.content;
     }
 
-    async function startRun() {
-      const reqPath = document.getElementById('reqPath').value.trim();
-      const outDir = document.getElementById('outDir').value.trim() || "./output";
-      if (!reqPath) {
-        alert("Please enter a requirements file path");
-        return;
-      }
-      document.getElementById('startBtn').disabled = true;
-      document.getElementById('status').innerText = 'Starting...';
-      document.getElementById('steps').innerText = '';
-      document.getElementById('result').innerText = '';
-      document.getElementById('error').innerText = '';
+<!--      const resp = await fetch('/api/run', {-->
+<!--        method: 'POST',-->
+<!--        headers: { 'Content-Type': 'application/json' },-->
+<!--        body: JSON.stringify({ requirements_path: reqPath, output_dir: outDir })-->
+<!--      });-->
 
-      const resp = await fetch('/api/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirements_path: reqPath, output_dir: outDir })
-      });
+<!--      if (!resp.ok) {-->
+<!--        document.getElementById('status').innerText = 'Error starting run';-->
+<!--        document.getElementById('startBtn').disabled = false;-->
+<!--        return;-->
+<!--      }-->
 
-      if (!resp.ok) {
-        document.getElementById('status').innerText = 'Error starting run';
-        document.getElementById('startBtn').disabled = false;
-        return;
-      }
+<!--      const data = await resp.json();-->
+<!--      currentRunId = data.run_id;-->
+<!--      document.getElementById('status').innerText = 'Running... (Run ID: ' + currentRunId + ')';-->
 
-      const data = await resp.json();
-      currentRunId = data.run_id;
-      document.getElementById('status').innerText = 'Running... (Run ID: ' + currentRunId + ')';
+<!--      if (pollTimer) clearInterval(pollTimer);-->
+<!--      pollTimer = setInterval(pollStatus, 5000);-->
+<!--    }-->
+        async function startRun(event) {
+        event.preventDefault();
 
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(pollStatus, 5000);
+        const reqFile = document.getElementById('reqFile').files[0];
+        const reqPath = document.getElementById('reqPath').value.trim();
+        const outDir = document.getElementById('outDir').value.trim();
+
+        if (!reqFile && !reqPath) {
+            alert("Please either upload a file or provide a file path");
+            return;
+        }
+
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('status').innerText = 'Starting...';
+        document.getElementById('steps').innerText = '';
+        document.getElementById('result').innerText = '';
+        document.getElementById('error').innerText = '';
+
+        try {
+            let resp;
+            if (reqFile) {
+                const formData = new FormData();
+                formData.append('requirements_file', reqFile);
+                if (outDir) {
+		     const payload = { output_dir: outDir };
+                    formData.append('payload', JSON.stringify(payload));
+                }
+                resp = await fetch('/api/run', {
+                    method: 'POST',
+                    body: formData
+                });
+            } else {
+                resp = await fetch('/api/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        requirements_path: reqPath,
+                        output_dir: outDir || undefined
+                    })
+                });
+            }
+
+            if (!resp.ok) {
+		const errorData = await resp.json();
+                throw new Error(errorData.detail || `HTTP error! status: ${resp.status}`);
+            }
+
+            const data = await resp.json();
+            currentRunId = data.run_id;
+            document.getElementById('status').innerText = 'Running... (Run ID: ' + currentRunId + ')';
+
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(pollStatus, 5000);
+        } catch (error) {
+            document.getElementById('error').innerText = 'Failed to start run: ' + error.message;
+            document.getElementById('startBtn').disabled = false;
+        }
     }
 
     async function pollStatus() {
       if (!currentRunId) return;
-      const resp = await fetch('/api/run/' + currentRunId);
-      if (!resp.ok) {
-        document.getElementById('status').innerText = 'Run not found';
-        clearInterval(pollTimer);
-        document.getElementById('startBtn').disabled = false;
-        return;
-      }
-      const data = await resp.json();
-      document.getElementById('status').innerText = data.status.toUpperCase();
 
-      if (Array.isArray(data.steps)) {
-        document.getElementById('steps').innerText = data.steps.join('\n\n---\n\n');
-      }
-
-      if (data.result) {
-        document.getElementById('result').innerText = JSON.stringify(data.result, null, 2);
-      }
-
-      if (data.error) {
-        document.getElementById('error').innerText = data.error;
-      }
-
-      if (data.status === 'completed' || data.status === 'error') {
-        clearInterval(pollTimer);
-        document.getElementById('startBtn').disabled = false;
-        if (data.status === 'completed') {
-          loadFileTree();
+      try {
+        const resp = await fetch('/api/run/' + currentRunId);
+        if (!resp.ok) {
+          document.getElementById('status').innerText = 'Run not found';
+          clearInterval(pollTimer);
+          document.getElementById('startBtn').disabled = false;
+          return;
         }
+
+        const data = await resp.json();
+        document.getElementById('status').innerText = data.status.toUpperCase();
+
+        if (Array.isArray(data.steps)) {
+          document.getElementById('steps').innerText = data.steps.join('\n\n---\n\n');
+        }
+
+        if (data.result) {
+          document.getElementById('result').innerText = JSON.stringify(data.result, null, 2);
+        }
+
+        if (data.error) {
+          document.getElementById('error').innerText = data.error;
+        }
+
+        if (data.status === 'completed' || data.status === 'error') {
+          clearInterval(pollTimer);
+          document.getElementById('startBtn').disabled = false;
+          if (data.status === 'completed') {
+            loadFileTree();
+          }
+        }
+      } catch (error) {
+        document.getElementById('error').innerText = 'Error polling status: ' + error.message;
+        clearInterval(pollTimer);
+        document.getElementById('startBtn').disabled = false;
       }
     }
+
+    document.getElementById('runForm').addEventListener('submit', startRun);
   </script>
 </body>
 </html>

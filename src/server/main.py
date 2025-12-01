@@ -1,16 +1,19 @@
-import uuid
 import logging
 import threading
+import uuid
+import certifi_win32
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.workflow.graph import build_graph, SDLCState
+from src.storage.backends import storage_backend
 from src.tools.artifacts import write_artifact_files
+from src.workflow.graph import build_graph, SDLCState
 
 # Configure logging
 logging.basicConfig(
@@ -33,20 +36,23 @@ logger.debug("main.py - workflow graph built successfully")
 logger.debug("main.py - mounting static files from /static directory")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
 class StartRunRequest(BaseModel):
-    requirements_path: str
-    output_dir: str
+    requirements_path: Optional[str] = None
+    requirements_content: Optional[str] = None
+    output_dir: Optional[str] = None
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the main dashboard HTML page."""
     logger.debug("index() - GET / request received")
     html_path = Path("static/index.html")
-    
+
     if not html_path.exists():
         logger.error(f"index() - dashboard HTML file not found at {html_path}")
         return HTMLResponse(content="<h1>Dashboard missing</h1>", status_code=500)
-    
+
     try:
         html = html_path.read_text(encoding="utf-8")
         logger.info(f"index() - successfully served dashboard HTML ({len(html)} bytes)")
@@ -55,18 +61,63 @@ async def index():
         logger.error(f"index() - failed to read HTML file: {e}", exc_info=True)
         return HTMLResponse(content="<h1>Error reading dashboard</h1>", status_code=500)
 
+
 @app.post("/api/run")
-async def start_run(payload: StartRunRequest):
+async def start_run(request: Request):
+    # requirements_file: UploadFile | None = File(None),
+    # payload: StartRunRequest | None = None):
     """Start a new SDLC workflow run with provided requirements.
     
     Validates input paths, initializes run state, and starts background workflow execution.
     """
     run_id = str(uuid.uuid4())
     logger.info(
-        f"start_run() - new run started with run_id={run_id}, "
-        f"requirements_path={payload.requirements_path}, output_dir={payload.output_dir}"
+        f"start_run() - new run started with run_id={run_id}"
     )
 
+    requirements = None
+    output_dir_param = None
+
+    # Check content type and handle accordingly
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        # Handle file upload
+        form = await request.form()
+        requirements_file = form.get("requirements_file")
+        payload_str = form.get("payload")
+
+        if requirements_file:
+            content = await requirements_file.read()
+            requirements = content.decode('utf-8')
+            logger.debug("start_run() - got requirements from uploaded file")
+
+        if payload_str:
+            import json
+            payload_data = json.loads(payload_str)
+            output_dir_param = payload_data.get("output_dir")
+
+    elif "application/json" in content_type:
+        # Handle JSON request (backward compatibility)
+        json_data = await request.json()
+
+        if json_data.get("requirements_content"):
+            requirements = json_data["requirements_content"]
+            logger.debug("start_run() - got requirements from direct content")
+        elif json_data.get("requirements_path"):
+            req_path = Path(json_data["requirements_path"])
+            if not req_path.exists():
+                raise FileNotFoundError(f"Requirements file not found: {req_path}")
+            requirements = req_path.read_text(encoding="utf-8")
+            logger.debug(f"start_run() - got requirements from local file: {req_path}")
+
+        output_dir_param = json_data.get("output_dir")
+
+    if not requirements:
+        raise HTTPException(
+            status_code=400,
+            detail="Requirements must be provided either as file upload, content, or file path"
+        )
     RUNS[run_id] = {
         "status": "running",
         "steps": [],
@@ -78,17 +129,8 @@ async def start_run(payload: StartRunRequest):
     def worker():
         """Background worker thread executing the SDLC workflow."""
         logger.debug(f"worker() - thread started for run_id={run_id}")
-        
+
         try:
-            # Validate and load requirements file
-            req_path = Path(payload.requirements_path)
-            if not req_path.exists():
-                error_msg = f"Requirements file not found: {req_path}"
-                logger.error(f"worker() - {error_msg}")
-                raise FileNotFoundError(error_msg)
-            
-            logger.debug(f"worker() - loading requirements from {req_path}")
-            requirements = req_path.read_text(encoding="utf-8")
             logger.info(f"worker() - successfully loaded requirements ({len(requirements)} chars)")
 
             # Initialize SDLC state
@@ -109,7 +151,7 @@ async def start_run(payload: StartRunRequest):
             # === Smart Resume Cache System ===
             import hashlib, json
             # Ensure output folder exists
-            output_dir = Path(payload.output_dir)
+            output_dir = Path(output_dir_param)
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Now safely create the cache folder
@@ -122,7 +164,7 @@ async def start_run(payload: StartRunRequest):
             # If cache exists, skip full workflow and regenerate artifacts only
             if cache_file.exists():
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
-                run_output_dir = Path(payload.output_dir) / f"run_{run_id}"
+                run_output_dir = Path(output_dir_param) / f"run_{run_id}"
 
                 write_artifact_files(
                     run_output_dir=run_output_dir,
@@ -131,13 +173,13 @@ async def start_run(payload: StartRunRequest):
                     tests_code=cached.get("qa_results", ""),
                     devops_code=cached.get("devops_output", ""),
                     approved=cached.get("approved", False),
+                    storage=cached.get("storage_backend", "")
                 )
 
                 RUNS[run_id]["steps"].append("Smart resume: Loaded cached outputs, skipped workflow.")
                 RUNS[run_id]["result"] = cached | {"output_dir": str(run_output_dir)}
                 RUNS[run_id]["status"] = "completed"
                 return
-
 
             # Final result
             logger.debug(f"worker() - invoking final graph state")
@@ -161,12 +203,12 @@ async def start_run(payload: StartRunRequest):
             logger.debug(f"worker() - final state constructed: approved={final_state.approved}")
 
             # Write artifacts to filesystem using semantic filenames
-            run_output_dir = Path(payload.output_dir) / f"run_{run_id}"
+            run_output_dir = Path(output_dir_param) / f"run_{run_id}"
             logger.debug(
                 f"worker() - writing artifacts to {run_output_dir}, "
                 f"approval_status={final_state.approved}"
             )
-            
+
             try:
                 write_artifact_files(
                     run_output_dir=run_output_dir,
@@ -175,6 +217,7 @@ async def start_run(payload: StartRunRequest):
                     tests_code=final_state.qa_results or "",
                     devops_code=final_state.devops_output or "",
                     approved=final_state.approved,
+                    storage=storage_backend
                 )
                 logger.info(f"worker() - artifacts successfully written to {run_output_dir}")
             except Exception as e:
@@ -198,7 +241,7 @@ async def start_run(payload: StartRunRequest):
             # Store successful output for future fast resume
             cache_file.write_text(json.dumps(RUNS[run_id]["result"], indent=2), encoding="utf-8")
             logger.info(f"worker() - run {run_id} completed successfully")
-            
+
         except Exception as e:
             logger.error(f"worker() - workflow execution failed: {e}", exc_info=True)
             RUNS[run_id]["status"] = "error"
@@ -207,9 +250,10 @@ async def start_run(payload: StartRunRequest):
     # Start background worker thread
     logger.debug(f"start_run() - launching background worker thread for run_id={run_id}")
     threading.Thread(target=worker, daemon=True).start()
-    
+
     logger.info(f"start_run() - returning run_id={run_id} to client")
     return {"run_id": run_id}
+
 
 @app.get("/api/run/{run_id}")
 async def get_run(run_id: str):
@@ -218,14 +262,15 @@ async def get_run(run_id: str):
     Returns current run status, executed steps, result (if completed), and any errors.
     """
     logger.debug(f"get_run() - status check for run_id={run_id}")
-    
+
     run = RUNS.get(run_id)
     if not run:
         logger.warning(f"get_run() - run_id={run_id} not found in registry")
         return JSONResponse(status_code=404, content={"error": "run not found"})
-    
+
     logger.debug(f"get_run() - run status: {run.get('status')}, steps: {len(run.get('steps', []))}")
     return run
+
 
 @app.get("/api/files/{run_id}")
 async def list_files(run_id: str):
@@ -234,42 +279,48 @@ async def list_files(run_id: str):
     Returns a tree structure of all files and folders in the output directory.
     """
     logger.debug(f"list_files() - file listing request for run_id={run_id}")
-    
-    run = RUNS.get(run_id)
-    result = run.get("result") if run else None
-    output_dir = result.get("output_dir") if result else None
-    
-    if not run or not output_dir:
-        logger.warning(f"list_files() - run_id={run_id} not found or has no result artifacts")
-        raise HTTPException(status_code=404, detail="Run or artifacts not found")
+    try:
+        files = await storage_backend.list_files(f"run_{run_id}")
+        return {"files": files}
+    except Exception as e:
+        logger.error(f"list_files() - error listing files: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    root = Path(output_dir)
-    logger.debug(f"list_files() - building file tree for {root}")
-
-    def build_tree(path: Path):
-        """Recursively build a tree structure of files and directories."""
-        children = []
-        try:
-            for item in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-                if item.is_file():
-                    children.append({
-                        "type": "file",
-                        "name": item.name,
-                        "path": str(item.relative_to(root)).replace('\\', '/')
-                    })
-                else:
-                    children.append({
-                        "type": "folder",
-                        "name": item.name,
-                        "children": build_tree(item)
-                    })
-        except Exception as e:
-            logger.error(f"build_tree() - error traversing {path}: {e}", exc_info=True)
-        return children
-
-    tree = build_tree(root)
-    logger.info(f"list_files() - successfully built file tree with {len(tree)} top-level items")
-    return {"root": root.name, "tree": tree}
+    # run = RUNS.get(run_id)
+    # result = run.get("result") if run else None
+    # output_dir = result.get("output_dir") if result else None
+    #
+    # if not run or not output_dir:
+    #     logger.warning(f"list_files() - run_id={run_id} not found or has no result artifacts")
+    #     raise HTTPException(status_code=404, detail="Run or artifacts not found")
+    #
+    # root = Path(output_dir)
+    # logger.debug(f"list_files() - building file tree for {root}")
+    #
+    # def build_tree(path: Path):
+    #     """Recursively build a tree structure of files and directories."""
+    #     children = []
+    #     try:
+    #         for item in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+    #             if item.is_file():
+    #                 children.append({
+    #                     "type": "file",
+    #                     "name": item.name,
+    #                     "path": str(item.relative_to(root)).replace('\\', '/')
+    #                 })
+    #             else:
+    #                 children.append({
+    #                     "type": "folder",
+    #                     "name": item.name,
+    #                     "children": build_tree(item)
+    #                 })
+    #     except Exception as e:
+    #         logger.error(f"build_tree() - error traversing {path}: {e}", exc_info=True)
+    #     return children
+    #
+    # tree = build_tree(root)
+    # logger.info(f"list_files() - successfully built file tree with {len(tree)} top-level items")
+    # return {"root": root.name, "tree": tree}
 
 
 @app.get("/api/file/{run_id}")
@@ -279,26 +330,28 @@ async def get_file_content(run_id: str, file_path: str):
     Returns the filename and full content of the requested file.
     """
     logger.debug(f"get_file_content() - content request for run_id={run_id}, file_path={file_path}")
-    
-    run = RUNS.get(run_id)
-    result = run.get("result") if run else None
-    output_dir = result.get("output_dir") if result else None
-    
-    if not run or not output_dir:
-        logger.warning(f"get_file_content() - run_id={run_id} not found or has no result")
-        raise HTTPException(status_code=404, detail="Run not found")
 
-    root = Path(output_dir)
-    file = root / file_path
-    
-    if not file.exists() or not file.is_file():
-        logger.warning(f"get_file_content() - file not found at {file}")
-        raise HTTPException(status_code=404, detail="File not found")
+    # run = RUNS.get(run_id)
+    # result = run.get("result") if run else None
+    # output_dir = result.get("output_dir") if result else None
+    #
+    # if not run or not output_dir:
+    #     logger.warning(f"get_file_content() - run_id={run_id} not found or has no result")
+    #     raise HTTPException(status_code=404, detail="Run not found")
+    #
+    # root = Path(output_dir)
+    # file = root / file_path
+    #
+    # if not file.exists() or not file.is_file():
+    #     logger.warning(f"get_file_content() - file not found at {file}")
+    #     raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        content = file.read_text(encoding="utf-8")
-        logger.info(f"get_file_content() - successfully retrieved {file.name} ({len(content)} chars)")
-        return {"filename": file.name, "content": content}
+        content = await storage_backend.read_file(f"run_{run_id}/{file_path}")
+        logger.info(f"get_file_content() - successfully retrieved {Path(file_path).name} ({len(content)} chars)")
+        return {"filename": Path(file_path).name, "content": content}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
     except Exception as e:
-        logger.error(f"get_file_content() - failed to read file {file}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to read file")
+        logger.error(f"get_file_content() - failed to read file {Path(file_path).name}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

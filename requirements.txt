@@ -3,5 +3,8 @@ uvicorn
 langchain
 langchain-community
 langchain_ollama
+langchain_openai
 langgraph
 python-dotenv
+python-multipart
+python-certifi-win32
